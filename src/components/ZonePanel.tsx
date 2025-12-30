@@ -95,7 +95,7 @@ export function ZonePanel({
 
   return (
     <div className="space-y-6">
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-4">
         <MetricCard
           title="수온"
           value={formatValue(snapshot?.temperatureC, 1)}
@@ -116,6 +116,13 @@ export function ZonePanel({
           unit="mg/L"
           hint={status ? `${status.reason}` : loading ? "로딩 중" : "데이터 없음"}
           icon={<Fish className="h-4 w-4" />}
+        />
+        <MetricCard
+          title="산소포화도"
+          value={formatValue(snapshot?.doSaturationPercent, 0)}
+          unit="%"
+          hint={snapshot ? "수온/DO 기반 계산값" : loading ? "로딩 중" : "데이터 없음"}
+          icon={<Gauge className="h-4 w-4" />}
         />
         <MetricCard
           title="pH"

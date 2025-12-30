@@ -111,6 +111,7 @@ class SensorPoint(BaseModel):
     turbidityNTU: float
     dissolvedOxygenMgL: float
     ph: Optional[float] = None
+    doSaturationPercent: Optional[float] = None
 
 
 class Snapshot(BaseModel):
@@ -118,6 +119,7 @@ class Snapshot(BaseModel):
     turbidityNTU: float
     dissolvedOxygenMgL: float
     ph: Optional[float] = None
+    doSaturationPercent: Optional[float] = None
     updatedAt: datetime
 
 

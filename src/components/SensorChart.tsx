@@ -38,6 +38,15 @@ export function SensorChart({ title, data }: { title: string; data: SensorPoint[
                 strokeWidth={2}
                 connectNulls
               />
+              <Line
+                type="monotone"
+                dataKey="doSaturationPercent"
+                name="DO Sat(%)"
+                stroke="#f97316"
+                dot={false}
+                strokeWidth={2}
+                connectNulls
+              />
               <Line type="monotone" dataKey="ph" name="pH" stroke="#22c55e" dot={false} strokeWidth={2} connectNulls />
             </LineChart>
           </ResponsiveContainer>

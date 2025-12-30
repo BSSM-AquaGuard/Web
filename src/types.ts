@@ -8,6 +8,7 @@ export type SensorSnapshot = {
   temperatureC: number | null;
   turbidityNTU: number | null;
   dissolvedOxygenMgL: number | null;
+  doSaturationPercent: number | null;
   ph: number | null;
   updatedAt: string;
 };
@@ -17,6 +18,7 @@ export type SensorPoint = {
   temperatureC: number | null;
   turbidityNTU: number | null;
   dissolvedOxygenMgL: number | null;
+  doSaturationPercent: number | null;
   ph: number | null;
 };
 

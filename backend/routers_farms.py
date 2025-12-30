@@ -9,6 +9,19 @@ from . import schemas
 router = APIRouter(prefix="/api", tags=["farms"])
 
 
+def calc_do_saturation_percent(temp_c: float | None, do_mgl: float | None) -> float | None:
+    """
+    근사식(담수, 1기압)을 사용해 DO 포화도(%)를 계산합니다.
+    """
+    if temp_c is None or do_mgl is None:
+        return None
+    # Weiss 식 단순 근사 (0~30°C 영역): mg/L
+    do_sat = 14.652 - 0.41022 * temp_c + 0.0079910 * temp_c * temp_c - 0.000077774 * temp_c * temp_c * temp_c
+    if do_sat <= 0:
+        return None
+    return round((do_mgl / do_sat) * 100, 2)
+
+
 @router.get("/farms", response_model=List[schemas.FarmRead])
 def list_farms(session: Session = Depends(get_session)):
     return session.exec(select(Farm)).all()
@@ -33,11 +46,13 @@ def get_snapshot(farm_id: int, zone_id: int, session: Session = Depends(get_sess
     row = session.exec(stmt).first()
     if not row:
         raise HTTPException(status_code=404, detail="No sensor data")
+    do_percent = calc_do_saturation_percent(row.temperatureC, row.dissolvedOxygenMgL)
     return schemas.Snapshot(
         temperatureC=row.temperatureC,
         turbidityNTU=row.turbidityNTU,
         dissolvedOxygenMgL=row.dissolvedOxygenMgL,
         ph=row.ph,
+        doSaturationPercent=do_percent,
         updatedAt=row.created_at,
     )
 
@@ -55,12 +70,14 @@ def get_series(farm_id: int, zone_id: int, range: str = "1h", session: Session =
     points: list[schemas.SensorPoint] = []
     for row in data:
         t = row.created_at.strftime("%H:%M")
+        do_percent = calc_do_saturation_percent(row.temperatureC, row.dissolvedOxygenMgL)
         points.append(
             schemas.SensorPoint(
                 t=t,
                 temperatureC=row.temperatureC,
                 turbidityNTU=row.turbidityNTU,
                 dissolvedOxygenMgL=row.dissolvedOxygenMgL,
+                doSaturationPercent=do_percent,
                 ph=row.ph,
             )
         )
