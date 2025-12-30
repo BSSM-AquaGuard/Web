@@ -44,7 +44,7 @@ class SensorData(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     farm_id: int = Field(foreign_key="farm.id")
     zone_id: int = Field(foreign_key="zone.id")
-    device_id: int = Field(foreign_key="device.id")
+    device_id: Optional[int] = Field(default=None, foreign_key="device.id")
     temperatureC: float
     turbidityNTU: float
     dissolvedOxygenMgL: float
