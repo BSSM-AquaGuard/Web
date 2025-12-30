@@ -1,0 +1,754 @@
+import React, { useEffect, useMemo, useState } from "react";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Button } from "@/components/ui/button";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Badge } from "@/components/ui/badge";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Input } from "@/components/ui/input";
+import { Switch } from "@/components/ui/switch";
+import { Separator } from "@/components/ui/separator";
+import { ScrollArea } from "@/components/ui/scroll-area";
+import { AlertTriangle, Camera, Fish, Gauge, ShieldAlert, Waves } from "lucide-react";
+import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, Legend } from "recharts";
+
+/**
+ * Aqua-Quad Dashboard (단일 파일)
+ * - 두 양식장(Farm A/B) + 각 2개 구역(Zone A/B)
+ * - 센서(수온/탁도/DO) 실시간 요약 + 히스토리 그래프
+ * - 카메라(CCTV/AI/ESP32-CAM) 스트림 URL 표시(실제 스트림은 <iframe>/<video>로 연결)
+ * - AI 이벤트 타임라인(해파리/쓰레기/천적/적조)
+ *
+ * 실제 연동 포인트:
+ * 1) API_BASE를 본인 서버로 변경
+ * 2) fetch* 함수들에서 백엔드 REST API 호출
+ * 3) 실시간은 WebSocket/MQTT 브릿지(서버가 WS로 push) 사용
+ */
+
+// ====== 설정 ======
+const API_BASE = "http://localhost:8000"; // TODO: 운영 서버로 변경
+const REFRESH_MS = 5000; // TODO: 실시간 주기(WS면 불필요)
+
+// ====== 타입 ======
+
+type FarmId = "farm-1" | "farm-2";
+
+type ZoneId = "zone-a" | "zone-b";
+
+type Zone = { id: ZoneId; name: string };
+
+type Farm = { id: FarmId; name: string; location?: string; zones: Zone[] };
+
+type SensorSnapshot = {
+  farmId: FarmId;
+  zoneId: ZoneId;
+  temperatureC: number;
+  turbidityNTU: number;
+  dissolvedOxygenMgL: number;
+  updatedAt: string; // ISO
+};
+
+type SensorPoint = {
+  t: string; // HH:mm
+  temperatureC: number;
+  turbidityNTU: number;
+  dissolvedOxygenMgL: number;
+};
+
+type CameraType = "esp_cam" | "cctv" | "ai_cam";
+
+type CameraItem = {
+  id: string;
+  farmId: FarmId;
+  zoneId: ZoneId;
+  name: string;
+  type: CameraType;
+  streamUrl: string; // e.g., rtsp/http/mjpeg/hls
+};
+
+type AIEventType = "red_tide" | "jellyfish" | "trash" | "predator" | "normal";
+
+type AIEvent = {
+  id: string;
+  farmId: FarmId;
+  zoneId: ZoneId;
+  cameraId?: string;
+  type: AIEventType;
+  confidence: number; // 0..1
+  message: string;
+  snapshotUrl?: string;
+  createdAt: string; // ISO
+};
+
+type RiskLevel = "NORMAL" | "SUSPECT" | "ALERT";
+
+type ZoneStatus = {
+  farmId: FarmId;
+  zoneId: ZoneId;
+  risk: RiskLevel;
+  reason: string;
+};
+
+// ====== 유틸 ======
+
+function fmtTime(iso: string) {
+  try {
+    const d = new Date(iso);
+    const hh = String(d.getHours()).padStart(2, "0");
+    const mm = String(d.getMinutes()).padStart(2, "0");
+    return `${hh}:${mm}`;
+  } catch {
+    return "--:--";
+  }
+}
+
+function fmtISOShort(iso: string) {
+  try {
+    const d = new Date(iso);
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, "0");
+    const day = String(d.getDate()).padStart(2, "0");
+    const hh = String(d.getHours()).padStart(2, "0");
+    const mm = String(d.getMinutes()).padStart(2, "0");
+    return `${y}-${m}-${day} ${hh}:${mm}`;
+  } catch {
+    return iso;
+  }
+}
+
+function clamp(n: number, a: number, b: number) {
+  return Math.max(a, Math.min(b, n));
+}
+
+function riskBadge(risk: RiskLevel) {
+  switch (risk) {
+    case "ALERT":
+      return <Badge variant="destructive">ALERT</Badge>;
+    case "SUSPECT":
+      return <Badge variant="secondary">SUSPECT</Badge>;
+    default:
+      return <Badge>NORMAL</Badge>;
+  }
+}
+
+function eventIcon(type: AIEventType) {
+  switch (type) {
+    case "red_tide":
+      return <Waves className="h-4 w-4" />;
+    case "jellyfish":
+      return <Fish className="h-4 w-4" />;
+    case "trash":
+      return <AlertTriangle className="h-4 w-4" />;
+    case "predator":
+      return <ShieldAlert className="h-4 w-4" />;
+    default:
+      return <Gauge className="h-4 w-4" />;
+  }
+}
+
+// ====== 더미 데이터(개발용). 실제 배포 시 fetch로 대체 ======
+
+const FARMS: Farm[] = [
+  {
+    id: "farm-1",
+    name: "양식장 1",
+    location: "부산 (예시)",
+    zones: [
+      { id: "zone-a", name: "Zone A" },
+      { id: "zone-b", name: "Zone B" },
+    ],
+  },
+  {
+    id: "farm-2",
+    name: "양식장 2",
+    location: "거제 (예시)",
+    zones: [
+      { id: "zone-a", name: "Zone A" },
+      { id: "zone-b", name: "Zone B" },
+    ],
+  },
+];
+
+const DEFAULT_CAMERAS: CameraItem[] = [
+  {
+    id: "cam-1",
+    farmId: "farm-1",
+    zoneId: "zone-a",
+    name: "CCTV-1",
+    type: "cctv",
+    streamUrl: "http://localhost:8080/stream/farm1/zoneA/cctv.m3u8",
+  },
+  {
+    id: "cam-2",
+    farmId: "farm-1",
+    zoneId: "zone-a",
+    name: "AI-CAM-1",
+    type: "ai_cam",
+    streamUrl: "http://localhost:8080/stream/farm1/zoneA/ai.mjpeg",
+  },
+  {
+    id: "cam-3",
+    farmId: "farm-1",
+    zoneId: "zone-b",
+    name: "ESP32-CAM 적조",
+    type: "esp_cam",
+    streamUrl: "http://localhost:8080/stream/farm1/zoneB/esp32cam.mjpeg",
+  },
+  {
+    id: "cam-4",
+    farmId: "farm-2",
+    zoneId: "zone-a",
+    name: "CCTV-2",
+    type: "cctv",
+    streamUrl: "http://localhost:8080/stream/farm2/zoneA/cctv.m3u8",
+  },
+];
+
+function makeDemoSeries(now = new Date()): SensorPoint[] {
+  const pts: SensorPoint[] = [];
+  for (let i = 11; i >= 0; i--) {
+    const d = new Date(now.getTime() - i * 5 * 60 * 1000);
+    const t = `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+    const temperatureC = 21 + Math.sin((12 - i) / 2) * 0.8 + (Math.random() - 0.5) * 0.3;
+    const turbidityNTU = 7 + Math.cos((12 - i) / 2) * 1.2 + (Math.random() - 0.5) * 0.6;
+    const dissolvedOxygenMgL = 6.5 + Math.sin((12 - i) / 3) * 0.6 + (Math.random() - 0.5) * 0.2;
+    pts.push({ t, temperatureC: Number(temperatureC.toFixed(2)), turbidityNTU: Number(turbidityNTU.toFixed(2)), dissolvedOxygenMgL: Number(dissolvedOxygenMgL.toFixed(2)) });
+  }
+  return pts;
+}
+
+function inferRiskFromSnapshot(s: SensorSnapshot): ZoneStatus {
+  // 간단 임계치(데모). 실제론 현장 보정 필요.
+  // - 탁도 급상승 + DO 급감 + 온도 급변 등을 조합
+  const turb = s.turbidityNTU;
+  const dox = s.dissolvedOxygenMgL;
+  const temp = s.temperatureC;
+
+  let score = 0;
+  if (turb >= 12) score += 2;
+  if (turb >= 9) score += 1;
+  if (dox <= 5.5) score += 2;
+  if (dox <= 6.0) score += 1;
+  if (temp >= 26 || temp <= 10) score += 2;
+
+  if (score >= 4) {
+    return { farmId: s.farmId, zoneId: s.zoneId, risk: "ALERT", reason: "탁도/DO 이상 수치 감지" };
+  }
+  if (score >= 2) {
+    return { farmId: s.farmId, zoneId: s.zoneId, risk: "SUSPECT", reason: "경계 수치(추가 확인 필요)" };
+  }
+  return { farmId: s.farmId, zoneId: s.zoneId, risk: "NORMAL", reason: "정상 범위" };
+}
+
+function demoEvents(now = new Date()): AIEvent[] {
+  const base = now.getTime();
+  return [
+    {
+      id: "ev-1",
+      farmId: "farm-1",
+      zoneId: "zone-a",
+      cameraId: "cam-2",
+      type: "jellyfish",
+      confidence: 0.89,
+      message: "해파리 의심 개체 감지 (AI)",
+      snapshotUrl: "",
+      createdAt: new Date(base - 2 * 60 * 1000).toISOString(),
+    },
+    {
+      id: "ev-2",
+      farmId: "farm-1",
+      zoneId: "zone-b",
+      cameraId: "cam-3",
+      type: "red_tide",
+      confidence: 0.72,
+      message: "적조 의심 색 패턴(ESP32-CAM 1차)",
+      snapshotUrl: "",
+      createdAt: new Date(base - 12 * 60 * 1000).toISOString(),
+    },
+    {
+      id: "ev-3",
+      farmId: "farm-2",
+      zoneId: "zone-a",
+      cameraId: "cam-4",
+      type: "trash",
+      confidence: 0.83,
+      message: "쓰레기 유입 의심 (AI)",
+      snapshotUrl: "",
+      createdAt: new Date(base - 25 * 60 * 1000).toISOString(),
+    },
+  ];
+}
+
+// ====== API 샘플(연동 시 사용) ======
+
+async function fetchSnapshot(_farmId: FarmId, _zoneId: ZoneId): Promise<SensorSnapshot> {
+  // TODO: 실제 구현
+  // const r = await fetch(`${API_BASE}/api/farms/${farmId}/zones/${zoneId}/snapshot`);
+  // return await r.json();
+  const now = new Date();
+  const series = makeDemoSeries(now);
+  const last = series[series.length - 1];
+  return {
+    farmId: _farmId,
+    zoneId: _zoneId,
+    temperatureC: last.temperatureC,
+    turbidityNTU: last.turbidityNTU,
+    dissolvedOxygenMgL: last.dissolvedOxygenMgL,
+    updatedAt: now.toISOString(),
+  };
+}
+
+async function fetchSeries(_farmId: FarmId, _zoneId: ZoneId): Promise<SensorPoint[]> {
+  // TODO: 실제 구현
+  // const r = await fetch(`${API_BASE}/api/farms/${farmId}/zones/${zoneId}/series?range=1h`);
+  // return await r.json();
+  return makeDemoSeries(new Date());
+}
+
+async function fetchEvents(_farmId: FarmId): Promise<AIEvent[]> {
+  // TODO: 실제 구현
+  // const r = await fetch(`${API_BASE}/api/farms/${farmId}/events?range=24h`);
+  // return await r.json();
+  return demoEvents(new Date()).filter((e) => e.farmId === _farmId);
+}
+
+// ====== 컴포넌트 ======
+
+function MetricCard({ title, value, unit, hint, icon }: { title: string; value: string; unit?: string; hint?: string; icon?: React.ReactNode }) {
+  return (
+    <Card className="rounded-2xl shadow-sm">
+      <CardHeader className="pb-2">
+        <CardTitle className="text-sm font-medium flex items-center gap-2">
+          <span className="text-muted-foreground">{icon}</span>
+          {title}
+        </CardTitle>
+      </CardHeader>
+      <CardContent>
+        <div className="flex items-end gap-2">
+          <div className="text-3xl font-semibold tracking-tight">{value}</div>
+          {unit ? <div className="text-sm text-muted-foreground pb-1">{unit}</div> : null}
+        </div>
+        {hint ? <div className="text-xs text-muted-foreground mt-1">{hint}</div> : null}
+      </CardContent>
+    </Card>
+  );
+}
+
+function StreamCard({ cam }: { cam: CameraItem }) {
+  const typeLabel = cam.type === "cctv" ? "CCTV" : cam.type === "ai_cam" ? "AI" : "ESP32-CAM";
+  return (
+    <Card className="rounded-2xl shadow-sm overflow-hidden">
+      <CardHeader className="pb-2">
+        <CardTitle className="text-sm font-medium flex items-center justify-between">
+          <span className="flex items-center gap-2">
+            <Camera className="h-4 w-4" /> {cam.name}
+          </span>
+          <Badge variant="secondary">{typeLabel}</Badge>
+        </CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        <div className="rounded-xl border bg-muted/20 h-44 flex items-center justify-center text-xs text-muted-foreground">
+          {/*
+            실제 스트리밍:
+            - HLS: <video controls src=...>
+            - MJPEG: <img src=...>
+            - RTSP: 서버에서 HLS/MJPEG로 변환 후 연결
+          */}
+          스트림 연결 위치
+        </div>
+        <div className="text-xs">
+          <div className="text-muted-foreground">Stream URL</div>
+          <div className="font-mono break-all">{cam.streamUrl}</div>
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+function EventsTimeline({ events, filter }: { events: AIEvent[]; filter: string }) {
+  const filtered = useMemo(() => {
+    const q = filter.trim().toLowerCase();
+    if (!q) return events;
+    return events.filter((e) => `${e.type} ${e.message}`.toLowerCase().includes(q));
+  }, [events, filter]);
+
+  return (
+    <Card className="rounded-2xl shadow-sm">
+      <CardHeader className="pb-2">
+        <CardTitle className="text-sm font-medium">AI 이벤트 타임라인</CardTitle>
+      </CardHeader>
+      <CardContent>
+        <ScrollArea className="h-72 pr-2">
+          <div className="space-y-3">
+            {filtered.length === 0 ? (
+              <div className="text-sm text-muted-foreground">이벤트가 없습니다.</div>
+            ) : (
+              filtered
+                .slice()
+                .sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1))
+                .map((e) => (
+                  <div key={e.id} className="flex gap-3 rounded-xl border p-3">
+                    <div className="mt-0.5 text-muted-foreground">{eventIcon(e.type)}</div>
+                    <div className="flex-1">
+                      <div className="flex items-center justify-between gap-2">
+                        <div className="font-medium text-sm">{e.message}</div>
+                        <div className="text-xs text-muted-foreground">{fmtISOShort(e.createdAt)}</div>
+                      </div>
+                      <div className="flex items-center justify-between mt-1">
+                        <div className="text-xs text-muted-foreground">Type: <span className="font-mono">{e.type}</span></div>
+                        <div className="text-xs">Conf: <span className="font-mono">{Math.round(e.confidence * 100)}%</span></div>
+                      </div>
+                    </div>
+                  </div>
+                ))
+            )}
+          </div>
+        </ScrollArea>
+      </CardContent>
+    </Card>
+  );
+}
+
+function SensorChart({ title, data }: { title: string; data: SensorPoint[] }) {
+  return (
+    <Card className="rounded-2xl shadow-sm">
+      <CardHeader className="pb-2">
+        <CardTitle className="text-sm font-medium">{title}</CardTitle>
+      </CardHeader>
+      <CardContent className="h-72">
+        <ResponsiveContainer width="100%" height="100%">
+          <LineChart data={data} margin={{ top: 10, right: 16, bottom: 0, left: 0 }}>
+            <CartesianGrid strokeDasharray="3 3" />
+            <XAxis dataKey="t" />
+            <YAxis />
+            <Tooltip />
+            <Legend />
+            <Line type="monotone" dataKey="temperatureC" name="Temp(°C)" dot={false} />
+            <Line type="monotone" dataKey="turbidityNTU" name="Turb(NTU)" dot={false} />
+            <Line type="monotone" dataKey="dissolvedOxygenMgL" name="DO(mg/L)" dot={false} />
+          </LineChart>
+        </ResponsiveContainer>
+      </CardContent>
+    </Card>
+  );
+}
+
+function ZonePanel({ farmId, zoneId, cameras, events }: { farmId: FarmId; zoneId: ZoneId; cameras: CameraItem[]; events: AIEvent[] }) {
+  const [snapshot, setSnapshot] = useState<SensorSnapshot | null>(null);
+  const [series, setSeries] = useState<SensorPoint[]>([]);
+  const [status, setStatus] = useState<ZoneStatus | null>(null);
+
+  const zoneCams = useMemo(() => cameras.filter((c) => c.farmId === farmId && c.zoneId === zoneId), [cameras, farmId, zoneId]);
+  const zoneEvents = useMemo(() => events.filter((e) => e.farmId === farmId && e.zoneId === zoneId), [events, farmId, zoneId]);
+
+  useEffect(() => {
+    let alive = true;
+
+    async function tick() {
+      const s = await fetchSnapshot(farmId, zoneId);
+      const ser = await fetchSeries(farmId, zoneId);
+      if (!alive) return;
+      setSnapshot(s);
+      setSeries(ser);
+      setStatus(inferRiskFromSnapshot(s));
+    }
+
+    tick();
+    const id = setInterval(tick, REFRESH_MS);
+    return () => {
+      alive = false;
+      clearInterval(id);
+    };
+  }, [farmId, zoneId]);
+
+  const last = series.length ? series[series.length - 1] : null;
+
+  return (
+    <div className="space-y-6">
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+        <MetricCard
+          title="수온"
+          value={snapshot ? snapshot.temperatureC.toFixed(1) : "--"}
+          unit="°C"
+          hint={snapshot ? `업데이트: ${fmtISOShort(snapshot.updatedAt)}` : "로딩 중"}
+          icon={<Gauge className="h-4 w-4" />}
+        />
+        <MetricCard
+          title="탁도"
+          value={snapshot ? snapshot.turbidityNTU.toFixed(1) : "--"}
+          unit="NTU"
+          hint={last ? `최근 1시간 추이` : "로딩 중"}
+          icon={<Waves className="h-4 w-4" />}
+        />
+        <MetricCard
+          title="산소포화(DO)"
+          value={snapshot ? snapshot.dissolvedOxygenMgL.toFixed(2) : "--"}
+          unit="mg/L"
+          hint={status ? `${status.reason}` : "로딩 중"}
+          icon={<Fish className="h-4 w-4" />}
+        />
+      </div>
+
+      <Card className="rounded-2xl shadow-sm">
+        <CardHeader className="pb-2">
+          <CardTitle className="text-sm font-medium flex items-center justify-between">
+            <span>Zone 상태</span>
+            {status ? riskBadge(status.risk) : <Badge variant="secondary">LOADING</Badge>}
+          </CardTitle>
+        </CardHeader>
+        <CardContent className="text-sm">
+          <div className="flex items-center gap-2">
+            <span className="text-muted-foreground">사유:</span>
+            <span>{status ? status.reason : "--"}</span>
+          </div>
+          <div className="text-xs text-muted-foreground mt-2">
+            ※ 현재는 데모 임계치 로직입니다. 실제 운영에서는 현장 기준으로 보정 후 적용하세요.
+          </div>
+        </CardContent>
+      </Card>
+
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+        <SensorChart title="센서 그래프 (최근 1시간, 5분 간격)" data={series} />
+        <EventsTimeline events={zoneEvents} filter={""} />
+      </div>
+
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+        {zoneCams.length === 0 ? (
+          <Card className="rounded-2xl shadow-sm">
+            <CardContent className="py-10 text-center text-sm text-muted-foreground">등록된 카메라가 없습니다.</CardContent>
+          </Card>
+        ) : (
+          zoneCams.map((c) => <StreamCard key={c.id} cam={c} />)
+        )}
+      </div>
+    </div>
+  );
+}
+
+export default function AquaQuadDashboard() {
+  const [farmId, setFarmId] = useState<FarmId>("farm-1");
+  const [zoneId, setZoneId] = useState<ZoneId>("zone-a");
+  const [events, setEvents] = useState<AIEvent[]>([]);
+  const [cameras, setCameras] = useState<CameraItem[]>(DEFAULT_CAMERAS);
+
+  const [search, setSearch] = useState("");
+  const [autoRefresh, setAutoRefresh] = useState(true);
+
+  const farm = useMemo(() => FARMS.find((f) => f.id === farmId)!, [farmId]);
+  const farmEvents = useMemo(() => events.filter((e) => e.farmId === farmId), [events, farmId]);
+
+  useEffect(() => {
+    let alive = true;
+
+    async function tick() {
+      const ev = await fetchEvents(farmId);
+      if (!alive) return;
+      setEvents(ev);
+    }
+
+    tick();
+    if (!autoRefresh) return;
+    const id = setInterval(tick, REFRESH_MS);
+    return () => {
+      alive = false;
+      clearInterval(id);
+    };
+  }, [farmId, autoRefresh]);
+
+  const filteredEvents = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    if (!q) return farmEvents;
+    return farmEvents.filter((e) => `${e.type} ${e.message} ${e.zoneId}`.toLowerCase().includes(q));
+  }, [farmEvents, search]);
+
+  return (
+    <div className="min-h-screen bg-background">
+      <header className="sticky top-0 z-10 border-b bg-background/80 backdrop-blur">
+        <div className="mx-auto max-w-7xl px-4 py-4 flex items-center justify-between gap-4">
+          <div className="flex items-center gap-3">
+            <div className="h-10 w-10 rounded-2xl border flex items-center justify-center shadow-sm">
+              <Waves className="h-5 w-5" />
+            </div>
+            <div>
+              <div className="text-lg font-semibold tracking-tight">Aqua-Quad</div>
+              <div className="text-xs text-muted-foreground">분산형 AI 양식장 가드 시스템 관제 대시보드</div>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2">
+            <div className="hidden md:flex items-center gap-2">
+              <span className="text-xs text-muted-foreground">Auto Refresh</span>
+              <Switch checked={autoRefresh} onCheckedChange={setAutoRefresh} />
+            </div>
+            <Button variant="secondary" className="rounded-2xl" onClick={() => window.location.reload()}>
+              새로고침
+            </Button>
+          </div>
+        </div>
+      </header>
+
+      <main className="mx-auto max-w-7xl px-4 py-6 space-y-6">
+        <Card className="rounded-2xl shadow-sm">
+          <CardContent className="py-4 flex flex-col md:flex-row md:items-center gap-3 md:gap-4">
+            <div className="flex items-center gap-2">
+              <span className="text-sm text-muted-foreground">양식장</span>
+              <Select value={farmId} onValueChange={(v) => {
+                setFarmId(v as FarmId);
+                setZoneId("zone-a");
+              }}>
+                <SelectTrigger className="w-44 rounded-2xl">
+                  <SelectValue placeholder="양식장 선택" />
+                </SelectTrigger>
+                <SelectContent>
+                  {FARMS.map((f) => (
+                    <SelectItem key={f.id} value={f.id}>{f.name}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+
+            <div className="flex items-center gap-2">
+              <span className="text-sm text-muted-foreground">구역</span>
+              <Select value={zoneId} onValueChange={(v) => setZoneId(v as ZoneId)}>
+                <SelectTrigger className="w-36 rounded-2xl">
+                  <SelectValue placeholder="구역 선택" />
+                </SelectTrigger>
+                <SelectContent>
+                  {farm.zones.map((z) => (
+                    <SelectItem key={z.id} value={z.id}>{z.name}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+
+            <div className="flex-1" />
+
+            <div className="flex items-center gap-2">
+              <Input
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                placeholder="이벤트 검색 (red_tide, trash, zone-a ...)"
+                className="w-full md:w-80 rounded-2xl"
+              />
+            </div>
+          </CardContent>
+        </Card>
+
+        <Tabs defaultValue="dashboard" className="w-full">
+          <TabsList className="rounded-2xl">
+            <TabsTrigger value="dashboard" className="rounded-2xl">대시보드</TabsTrigger>
+            <TabsTrigger value="events" className="rounded-2xl">이벤트</TabsTrigger>
+            <TabsTrigger value="cameras" className="rounded-2xl">카메라</TabsTrigger>
+            <TabsTrigger value="settings" className="rounded-2xl">설정</TabsTrigger>
+          </TabsList>
+
+          <TabsContent value="dashboard" className="mt-6">
+            <ZonePanel farmId={farmId} zoneId={zoneId} cameras={cameras} events={events} />
+          </TabsContent>
+
+          <TabsContent value="events" className="mt-6">
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+              <EventsTimeline events={filteredEvents} filter={search} />
+              <Card className="rounded-2xl shadow-sm">
+                <CardHeader className="pb-2">
+                  <CardTitle className="text-sm font-medium">이벤트 통계(데모)</CardTitle>
+                </CardHeader>
+                <CardContent className="space-y-3 text-sm">
+                  <div className="flex items-center justify-between">
+                    <span className="text-muted-foreground">총 이벤트</span>
+                    <span className="font-mono">{filteredEvents.length}</span>
+                  </div>
+                  <Separator />
+                  {(["red_tide", "jellyfish", "trash", "predator", "normal"] as AIEventType[]).map((t) => {
+                    const c = filteredEvents.filter((e) => e.type === t).length;
+                    return (
+                      <div key={t} className="flex items-center justify-between">
+                        <span className="flex items-center gap-2">{eventIcon(t)} <span className="font-mono">{t}</span></span>
+                        <span className="font-mono">{c}</span>
+                      </div>
+                    );
+                  })}
+                  <div className="text-xs text-muted-foreground pt-2">
+                    실제 운영에서는 기간별 집계 API를 추가하세요: <span className="font-mono">/api/farms/:id/events/stats</span>
+                  </div>
+                </CardContent>
+              </Card>
+            </div>
+          </TabsContent>
+
+          <TabsContent value="cameras" className="mt-6">
+            <div className="flex items-center justify-between">
+              <div>
+                <div className="text-lg font-semibold">카메라 목록</div>
+                <div className="text-xs text-muted-foreground">RTSP는 서버에서 HLS/MJPEG로 변환 후 웹에 연결하는 구성이 안정적입니다.</div>
+              </div>
+              <Button className="rounded-2xl" onClick={() => {
+                // 간단 추가(데모)
+                const id = `cam-${Math.random().toString(16).slice(2)}`;
+                setCameras((prev) => [
+                  ...prev,
+                  { id, farmId, zoneId, name: `새 카메라(${prev.length + 1})`, type: "cctv", streamUrl: "http://localhost:8080/stream/new.mjpeg" },
+                ]);
+              }}>카메라 추가(데모)</Button>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 mt-4">
+              {cameras
+                .filter((c) => c.farmId === farmId)
+                .map((c) => (
+                  <StreamCard key={c.id} cam={c} />
+                ))}
+            </div>
+          </TabsContent>
+
+          <TabsContent value="settings" className="mt-6">
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+              <Card className="rounded-2xl shadow-sm">
+                <CardHeader className="pb-2">
+                  <CardTitle className="text-sm font-medium">서버 연동</CardTitle>
+                </CardHeader>
+                <CardContent className="space-y-3 text-sm">
+                  <div className="text-muted-foreground">현재 API Base</div>
+                  <div className="font-mono break-all">{API_BASE}</div>
+                  <div className="text-xs text-muted-foreground">
+                    백엔드 권장 엔드포인트 예시:
+                    <div className="font-mono mt-1">GET /api/farms</div>
+                    <div className="font-mono">GET /api/farms/:farmId/zones/:zoneId/snapshot</div>
+                    <div className="font-mono">GET /api/farms/:farmId/zones/:zoneId/series?range=1h</div>
+                    <div className="font-mono">GET /api/farms/:farmId/events?range=24h</div>
+                    <div className="font-mono">WS /ws (events, snapshots push)</div>
+                  </div>
+                </CardContent>
+              </Card>
+
+              <Card className="rounded-2xl shadow-sm">
+                <CardHeader className="pb-2">
+                  <CardTitle className="text-sm font-medium">운영 정책</CardTitle>
+                </CardHeader>
+                <CardContent className="space-y-3 text-sm">
+                  <div className="flex items-center justify-between">
+                    <span>자동 새로고침</span>
+                    <Switch checked={autoRefresh} onCheckedChange={setAutoRefresh} />
+                  </div>
+                  <Separator />
+                  <div className="text-xs text-muted-foreground">
+                    실전 권장:
+                    <ul className="list-disc pl-4 space-y-1 mt-2">
+                      <li>센서/AI 이벤트는 서버에서 WebSocket으로 push</li>
+                      <li>카메라 스트림은 RTSP → HLS/MJPEG 변환 후 제공</li>
+                      <li>장비 인증(Device Token) + Rate Limit 적용</li>
+                      <li>네트워크 끊김 시 Pi 로컬 큐 저장 후 재전송</li>
+                    </ul>
+                  </div>
+                </CardContent>
+              </Card>
+            </div>
+          </TabsContent>
+        </Tabs>
+
+        <footer className="pt-6 pb-10 text-xs text-muted-foreground">
+          <div>© Aqua-Quad. Edge(AI) + Distributed Sensors + Power Management Dashboard.</div>
+        </footer>
+      </main>
+    </div>
+  );
+}

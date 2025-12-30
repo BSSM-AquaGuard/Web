@@ -1,0 +1,17 @@
+from contextlib import contextmanager
+from pathlib import Path
+from sqlmodel import SQLModel, create_engine, Session
+from .config import settings
+
+DB_PATH = Path(settings.sqlite_path)
+DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+engine = create_engine(f"sqlite:///{DB_PATH}", echo=False, connect_args={"check_same_thread": False})
+
+
+def init_db() -> None:
+    SQLModel.metadata.create_all(engine)
+
+
+def get_session() -> Session:
+    with Session(engine) as session:
+        yield session
