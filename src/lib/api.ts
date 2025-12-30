@@ -24,9 +24,11 @@ async function request<T>(path: string, options: FetchOpts = {}): Promise<T | nu
         ...authHeaders(token),
       },
     });
+    if (res.status === 404) return null; // no data yet; surface as null without console noise
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     return (await res.json()) as T;
   } catch (err) {
+    // 404는 위에서 처리, 여기선 기타 오류만 로그
     console.error("API request failed:", path, err);
     return null;
   }
@@ -82,6 +84,17 @@ export async function createFarm(payload: { name: string; location?: string }, t
   });
   if (!api) throw new Error("Failed to create farm");
   return toFarm(api);
+}
+
+export async function deleteFarm(farmId: FarmId, token?: string): Promise<void> {
+  const res = await fetch(`${BASE_URL}/api/admin/farms/${farmId}`, {
+    method: "DELETE",
+    headers: {
+      "Content-Type": "application/json",
+      ...authHeaders(token),
+    },
+  });
+  if (!res.ok) throw new Error(`Failed to delete farm (${res.status})`);
 }
 
 export async function fetchZones(farmId: FarmId, token?: string): Promise<Zone[]> {

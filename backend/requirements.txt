@@ -3,5 +3,7 @@ uvicorn[standard]==0.32.0
 sqlmodel==0.0.22
 python-jose==3.3.0
 passlib[bcrypt]==1.7.4
+bcrypt==3.2.2
 pydantic-settings==2.7.0
 python-multipart==0.0.17
+email-validator==2.2.0

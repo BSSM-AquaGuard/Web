@@ -36,13 +36,20 @@ def startup_event():
         # seed default farm/zone if empty
         has_farm = session.exec(select(Farm)).first()
         if not has_farm:
-            farm = Farm(name="기본 양식장", location="local")
+            farm = Farm(name="기본 양식장", location="local", owner_id=None)
             session.add(farm)
             session.commit()
             session.refresh(farm)
             zone = Zone(farm_id=farm.id, name="main")
             session.add(zone)
             session.commit()
+        else:
+            farm = has_farm
+            # 기존 기본 양식장이 admin 소유로 박혀 있다면 소유자 해제해서 첫 사용자에게 양도 가능하게 함
+            if farm.name == "기본 양식장" and admin and farm.owner_id == admin.id:
+                farm.owner_id = None
+                session.add(farm)
+                session.commit()
 
 
 # Routers

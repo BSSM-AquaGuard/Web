@@ -12,7 +12,7 @@ import { ZonePanel } from "@/components/ZonePanel";
 import { EventsTimeline } from "@/components/EventsTimeline";
 import { StreamCard } from "@/components/StreamCard";
 import { API_BASE, REFRESH_MS } from "@/lib/config";
-import { apiLogin, apiSignup, createCamera, createFarm, deleteCamera, fetchCameras, fetchEvents, fetchFarms, fetchZones } from "@/lib/api";
+import { apiLogin, apiSignup, createCamera, createFarm, deleteCamera, deleteFarm, fetchCameras, fetchEvents, fetchFarms, fetchZones } from "@/lib/api";
 import { clearAuth, loadAuth, saveAuth } from "@/lib/auth";
 import { AIEvent, AIEventType, CameraItem, CameraType, Farm, FarmId, Zone, ZoneId } from "@/types";
 
@@ -41,6 +41,7 @@ export default function App() {
   const [newCameraType, setNewCameraType] = useState<CameraType>("cctv");
   const [cameraError, setCameraError] = useState<string | null>(null);
   const [cameraSaving, setCameraSaving] = useState(false);
+  const [farmDeleting, setFarmDeleting] = useState(false);
   const farmEvents = useMemo(() => (farmId ? events.filter((e) => e.farmId === farmId) : []), [events, farmId]);
 
   useEffect(() => {
@@ -194,7 +195,7 @@ export default function App() {
 
   const handleAddFarm = async () => {
     if (!token) {
-      setFarmError("양식장 추가는 관리자 로그인 후 가능합니다.");
+      setFarmError("양식장 추가는 로그인 후 가능합니다.");
       return;
     }
     const name = newFarmName.trim() || `새 양식장 ${farms.length + 1}`;
@@ -206,7 +207,36 @@ export default function App() {
       setNewFarmName("");
       setNewFarmLocation("");
     } catch (err) {
-      setFarmError("양식장 생성 실패: 관리자 권한 또는 백엔드 상태를 확인하세요.");
+      setFarmError("양식장 생성 실패: 권한 또는 백엔드 상태를 확인하세요.");
+    }
+  };
+
+  const handleDeleteFarm = async () => {
+    if (!token) {
+      setFarmError("양식장 삭제는 로그인 후 가능합니다.");
+      return;
+    }
+    if (farmId == null) {
+      setFarmError("삭제할 양식장을 선택하세요.");
+      return;
+    }
+    if (!window.confirm("현재 선택한 양식장을 삭제할까요? (존/장치/이벤트/센서 데이터 포함)")) return;
+    setFarmError(null);
+    setFarmDeleting(true);
+    try {
+      await deleteFarm(farmId, token);
+      const remaining = farms.filter((f) => f.id !== farmId);
+      setFarms(remaining);
+      setZones([]);
+      setCameras([]);
+      setEvents([]);
+      setFarmId(remaining[0]?.id ?? null);
+      setZoneId(null);
+      setRefreshKey((k) => k + 1);
+    } catch (err) {
+      setFarmError("양식장 삭제 실패: 권한 또는 백엔드 상태를 확인하세요.");
+    } finally {
+      setFarmDeleting(false);
     }
   };
 
@@ -310,11 +340,11 @@ export default function App() {
         <Card className="rounded-2xl shadow-sm">
           <CardContent className="py-4 flex flex-col gap-3">
             <div className="flex flex-col md:flex-row md:items-center gap-3 md:gap-4">
-              <div className="flex items-center gap-2">
-                <span className="text-sm text-muted-foreground">양식장</span>
-                <Select
-                  value={farmId ? String(farmId) : ""}
-                  onValueChange={(v) => {
+            <div className="flex items-center gap-2">
+              <span className="text-sm text-muted-foreground">양식장</span>
+              <Select
+                value={farmId ? String(farmId) : ""}
+                onValueChange={(v) => {
                     setFarmId(v ? Number(v) : null);
                     setRefreshKey((k) => k + 1);
                   }}
@@ -363,6 +393,9 @@ export default function App() {
               />
               <Button className="rounded-xl md:w-40" onClick={handleAddFarm}>
                 양식장 추가
+              </Button>
+              <Button variant="destructive" className="rounded-xl md:w-32" onClick={handleDeleteFarm} disabled={farmDeleting || farmId == null}>
+                {farmDeleting ? "삭제 중..." : "양식장 삭제"}
               </Button>
               {farmError ? <div className="text-xs text-destructive">{farmError}</div> : null}
             </div>
